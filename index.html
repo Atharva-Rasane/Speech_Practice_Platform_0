@@ -2,203 +2,237 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Pronunciation Trainer</title>
+  <title>Speaking Practice – Fast Offline Vosk + Web Worker</title>
   <style>
-    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f2f2f2; padding: 20px; text-align: center; }
-    h1 { color: #333; margin-bottom: 10px; }
-    #twister { font-size: 20px; margin: 10px auto; background: #fff; padding: 10px; border-radius: 8px; width: 80%; }
-    .controls { margin: 10px 0; }
-    button { padding: 8px 16px; font-size: 16px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; transition: 0.3s; }
-    button:hover { background-color: #ddd; }
-    input[type="number"] { width: 60px; padding: 5px; font-size: 16px; margin-left: 5px; }
-    #timer { font-size: 18px; margin: 10px 0; color: #333; }
-    #results, #player { margin-top: 20px; }
-    table { margin: 10px auto; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
-    th, td { padding: 8px 12px; border: 1px solid #ccc; }
-    .correct { background-color: #d4edda; color: #155724; font-weight: bold; }
-    .wrong { background-color: #f8d7da; color: #721c24; font-weight: bold; }
-    audio { margin-top: 10px; width: 300px; }
+    html, body {
+      height:100%; margin:0;
+      font-family:sans-serif;
+      display:flex; align-items:center; justify-content:center;
+      background:#FFF; transition:background .2s;
+    }
+    .container {
+      background:white; padding:2rem; border-radius:8px;
+      box-shadow:0 4px 12px rgba(0,0,0,0.1);
+      max-width:520px; width:90%; text-align:center;
+    }
+    #timer { font-size:2rem; margin:1rem 0; }
+    button {
+      padding:.6rem 1.2rem; font-size:1rem; margin:.5rem;
+      border:none; border-radius:4px;
+      background:#007bff; color:white; cursor:pointer;
+      transition:background .2s;
+    }
+    button:hover { background:#0056b3; }
+    #status { color:#555; margin-bottom:1rem; }
+    #spinner {
+      display:none; margin-top:1rem;
+      font-size:1.1rem; color:#007bff;
+    }
+    .tabs { display:none; justify-content:center; margin-top:1rem; }
+    .tabs button {
+      background:#e0e0e0; color:#333; margin:0 .25rem;
+    }
+    .tabs button.active {
+      background:#007bff; color:white;
+    }
+    .panel { display:none; margin-top:1rem; }
+    .panel.active { display:block; }
+    audio, video {
+      max-width:100%; border:1px solid #ccc; border-radius:4px;
+    }
+    pre.eval {
+      text-align:left; background:#f9f9f9; padding:1rem;
+      border:1px solid #ddd; border-radius:4px;
+      white-space:pre-wrap; max-height:200px; overflow-y:auto;
+    }
+    #preview {
+      position:fixed; bottom:10px; right:10px; width:140px;
+      display:none; border:2px solid white; border-radius:4px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.2);
+    }
   </style>
 </head>
 <body>
+  <div class="container">
+    <h1>Speaking Practice</h1>
+    <div id="timer">02:30</div>
+    <button id="recordBtn">Start Recording</button>
+    <button id="saveRecording" style="display:none">Save Recording</button>
+    <div id="status">Loading model…</div>
+    <div id="spinner">⏳ Transcribing…</div>
 
-  <h1>🎤 Pronunciation Trainer</h1>
-  
-  <div id="twister">Peter Piper picked a peck of pickled peppers</div>
-
-  <div class="controls">
-    ⏱️ Time Limit (s):
-    <input type="number" id="seconds" value="10" min="5" max="30">
-    <button onclick="startRecording()">🔴 Start Recording</button>
-    <button onclick="playTTS()">🗣️ Hear Pronunciation</button>
+    <div class="tabs" id="evalTabs">
+      <button data-target="audioPanel">Audio</button>
+      <button data-target="videoPanel">Video</button>
+      <button data-target="transcriptPanel">Transcript</button>
+    </div>
+    <div id="audioPanel" class="panel">
+      <audio controls id="audioPlayback"></audio>
+    </div>
+    <div id="videoPanel" class="panel">
+      <video controls muted id="videoPlayback"></video>
+    </div>
+    <div id="transcriptPanel" class="panel">
+      <pre class="eval" id="transcriptText">[Your final transcript here]</pre>
+    </div>
   </div>
 
-  <div id="timer">Time left: <span id="time">0</span>s</div>
-
-  <div id="results"></div>
-  <div id="player"></div>
+  <video id="preview" autoplay muted playsinline></video>
 
   <script>
-    let mediaRecorder;
-    let audioChunks = [];
-    let recognition;
-    let recordingTimeout;
-    let timerInterval;
+    // UI refs
+    const recordBtn    = document.getElementById('recordBtn');
+    const saveBtn      = document.getElementById('saveRecording');
+    const statusEl     = document.getElementById('status');
+    const spinnerEl    = document.getElementById('spinner');
+    const timerEl      = document.getElementById('timer');
+    const previewEl    = document.getElementById('preview');
+    const tabs         = document.getElementById('evalTabs');
+    const tabButtons   = tabs.querySelectorAll('button');
+    const panels       = document.querySelectorAll('.panel');
+    const audioEl      = document.getElementById('audioPlayback');
+    const videoEl      = document.getElementById('videoPlayback');
+    const transcriptEl = document.getElementById('transcriptText');
 
-    let targetSentence = document.getElementById('twister').innerText.toLowerCase();
-    let targetWords = targetSentence.split(" ");
+    // Recording state
+    let mediaRecorder, chunks = [], finalTranscript = '';
+    let isRecording = false, localStream;
+    let startTime, timerInterval, stopTimeout;
+    const maxDuration = 2.5 * 60 * 1000;
+    const thresholds = { green:1*60*1000, yellow:1.5*60*1000, red:2*60*1000 };
 
-    function updateTarget() {
-      targetSentence = document.getElementById('twister').innerText.toLowerCase();
-      targetWords = targetSentence.split(" ");
-    }
+    // IndexedDB for persistence
+    const dbp = new Promise((res, rej) => {
+      const rq = indexedDB.open('SpeakingPracticeDB',1);
+      rq.onupgradeneeded = () =>
+        rq.result.createObjectStore('recordings',{keyPath:'id',autoIncrement:true});
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror   = () => rej(rq.error);
+    });
 
+    // Launch the worker
+    const worker = new Worker('voskWorker.js');
+    worker.postMessage({ cmd:'init', modelUrl:'model/vosk-model-small-en-us-0.15.tar.gz' });
+    worker.onmessage = e => {
+      if (e.data.cmd === 'ready') {
+        statusEl.textContent = 'Model loaded. Ready to record.';
+      }
+      if (e.data.cmd === 'transcript') {
+        finalTranscript = e.data.text;
+        transcriptEl.textContent = finalTranscript || '[no speech]';
+        spinnerEl.style.display = 'none';
+        statusEl.textContent = 'Done.';
+        saveBtn.style.display = 'inline-block';
+      }
+    };
+
+    // Button wiring
+    recordBtn.onclick = ()=> isRecording? stopRecording() : startRecording();
+    saveBtn.onclick   = async ()=>{
+      const blob = new Blob(chunks,{type:'video/webm'});
+      const db   = await dbp;
+      const tx   = db.transaction('recordings','readwrite');
+      tx.objectStore('recordings').add({ blob, transcript: finalTranscript });
+      tx.oncomplete = ()=> statusEl.textContent = 'Saved!';
+    };
+
+    // Start recording
     async function startRecording() {
-      updateTarget();
-      document.getElementById('results').innerHTML = "";
-      document.getElementById('player').innerHTML = "";
-      document.getElementById('time').textContent = document.getElementById('seconds').value;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({audio:true,video:true});
+      } catch {
+        statusEl.textContent = 'Permissions denied';
+        return;
+      }
+      // reset UI/data
+      chunks = []; finalTranscript='';
+      audioEl.src = videoEl.src = '';
+      tabs.style.display = 'none';
+      saveBtn.style.display = 'none';
+      document.body.style.background = '#FFF';
+      previewEl.srcObject = localStream;
+      previewEl.style.display = 'block';
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder = new MediaRecorder(stream);
-      audioChunks = [];
+      startTime = Date.now(); updateTimer();
+      timerInterval = setInterval(updateTimer,200);
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunks.push(e.data);
-      };
-
+      mediaRecorder = new MediaRecorder(localStream);
+      mediaRecorder.ondataavailable = e=>chunks.push(e.data);
+      mediaRecorder.onstop = onRecordingStop;
       mediaRecorder.start();
-      startTimer();
 
-      recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-      recognition.lang = 'en-US';
-      recognition.interimResults = false;
-      recognition.maxAlternatives = 1;
-      recognition.start();
-
-      recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript.toLowerCase();
-        console.log('Heard:', transcript);
-        stopEverything(transcript);
-      };
-
-      recognition.onerror = (e) => {
-        console.error('Recognition error:', e.error);
-        stopEverything("");
-      };
-
-      recordingTimeout = setTimeout(() => {
-        recognition.stop();
-        stopEverything("");
-      }, document.getElementById('seconds').value * 1000);
+      isRecording = true;
+      recordBtn.textContent = 'Stop Recording';
+      statusEl.textContent = 'Recording…';
+      stopTimeout = setTimeout(stopRecording, maxDuration);
     }
 
-    function stopEverything(transcript) {
-      clearTimeout(recordingTimeout);
-      clearInterval(timerInterval);
-
-      if (recognition) recognition.stop();
-      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    // Stop recording
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state==='recording') {
         mediaRecorder.stop();
+        clearTimeout(stopTimeout);
+        clearInterval(timerInterval);
+        isRecording = false;
+      }
+    }
+
+    // Once stopped, hand PCM to worker
+    async function onRecordingStop() {
+      const blob = new Blob(chunks,{type:'video/webm'});
+      const url  = URL.createObjectURL(blob);
+      audioEl.src = videoEl.src = url;
+
+      previewEl.style.display = 'none';
+      localStream.getTracks().forEach(t=>t.stop());
+
+      tabs.style.display = 'flex';
+      activateTab(tabButtons[0]);
+      recordBtn.textContent = 'Start Recording';
+      statusEl.textContent = '';
+      spinnerEl.style.display = 'block';
+
+      // Decode to Float32Array → Int16Array PCM
+      const ab        = await blob.arrayBuffer();
+      const audioCtx  = new AudioContext();
+      const decoded   = await audioCtx.decodeAudioData(ab);
+      const floatData = decoded.getChannelData(0);
+      const pcm       = new Int16Array(floatData.length);
+      for (let i=0; i<floatData.length; i++) {
+        const s = Math.max(-1,Math.min(1,floatData[i]));
+        pcm[i] = s<0? s*0x8000 : s*0x7FFF;
       }
 
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = document.createElement('audio');
-        audio.src = audioUrl;
-        audio.controls = true;
-        audio.id = "audioPlayer";
-
-        const slowButton = document.createElement('button');
-        slowButton.innerText = "🐢 Play Slow";
-        slowButton.onclick = () => {
-          const player = document.getElementById('audioPlayer');
-          if (player) {
-            player.playbackRate = 0.6;
-            player.play();
-          }
-        };
-
-        const normalButton = document.createElement('button');
-        normalButton.innerText = "▶️ Play Normal";
-        normalButton.onclick = () => {
-          const player = document.getElementById('audioPlayer');
-          if (player) {
-            player.playbackRate = 1.0;
-            player.play();
-          }
-        };
-
-        const playerDiv = document.getElementById('player');
-        playerDiv.innerHTML = '<h3>🎧 Your Recording:</h3>';
-        playerDiv.appendChild(audio);
-        playerDiv.appendChild(slowButton);
-        playerDiv.appendChild(normalButton);
-      };
-
-      showPhoneticComparison(transcript.split(" "));
+      // send to worker
+      worker.postMessage({
+        cmd: 'transcribe',
+        pcm,
+        sampleRate: decoded.sampleRate
+      }, [pcm.buffer]);
     }
 
-    function startTimer() {
-      let timeLeft = parseInt(document.getElementById('seconds').value);
-      document.getElementById('time').textContent = timeLeft;
-
-      timerInterval = setInterval(() => {
-        timeLeft--;
-        document.getElementById('time').textContent = timeLeft;
-        if (timeLeft <= 0) {
-          clearInterval(timerInterval);
-        }
-      }, 1000);
+    // Timer & bg update
+    function updateTimer() {
+      const elapsed = Date.now()-startTime;
+      const rem     = Math.max(0, maxDuration-elapsed);
+      const m = String(Math.floor(rem/60000)).padStart(2,'0');
+      const s = String(Math.floor((rem%60000)/1000)).padStart(2,'0');
+      timerEl.textContent = `${m}:${s}`;
+      const bg = elapsed>=thresholds.red    ? '#FFCCCC'
+               : elapsed>=thresholds.yellow ? '#FFFFCC'
+               : elapsed>=thresholds.green  ? '#CCFFCC'
+               : '#FFFFFF';
+      document.body.style.background = bg;
     }
 
-    function fakePhonetic(word) {
-      return word
-        .toLowerCase()
-        .replace(/a/g, "AH")
-        .replace(/e/g, "EH")
-        .replace(/i/g, "IH")
-        .replace(/o/g, "OW")
-        .replace(/u/g, "UH")
-        .toUpperCase()
-        .split("")
-        .join(" ");
-    }
-
-    function showPhoneticComparison(spokenWords) {
-      let html = "<h3>🧪 Phonetic Comparison</h3><table><tr><th>Expected</th><th>Your Speech</th></tr>";
-
-      for (let i = 0; i < targetWords.length; i++) {
-        const expectedWord = targetWords[i] || "";
-        const spokenWord = spokenWords[i] || "";
-        const expectedPhonetic = fakePhonetic(expectedWord);
-        const spokenPhonetic = fakePhonetic(spokenWord);
-
-        const correctness = expectedPhonetic === spokenPhonetic ? "correct" : "wrong";
-
-        html += `<tr>
-                  <td class="${correctness}">${expectedWord}<br><small>[${expectedPhonetic}]</small></td>
-                  <td>${spokenWord}<br><small>[${spokenPhonetic}]</small></td>
-                 </tr>`;
-      }
-
-      html += "</table>";
-      document.getElementById('results').innerHTML = html;
-    }
-
-    function playTTS() {
-      updateTarget();
-      const utterance = new SpeechSynthesisUtterance(targetSentence);
-      utterance.lang = 'en-US';
-      utterance.rate = 0.9;
-      speechSynthesis.speak(utterance);
-
-      setTimeout(() => {
-        speechSynthesis.cancel(); // Cut off if exceeding time limit
-      }, document.getElementById('seconds').value * 1000);
+    // Tabs logic
+    tabButtons.forEach(btn=>btn.onclick=()=>activateTab(btn));
+    function activateTab(btn) {
+      tabButtons.forEach(b=>b.classList.remove('active'));
+      panels.forEach(p=>p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(btn.dataset.target).classList.add('active');
     }
   </script>
-
 </body>
 </html>

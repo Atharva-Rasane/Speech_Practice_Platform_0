@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Pronunciation Trainer</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f2f2f2; padding: 20px; text-align: center; }
+    h1 { color: #333; margin-bottom: 10px; }
+    #twister { font-size: 20px; margin: 10px auto; background: #fff; padding: 10px; border-radius: 8px; width: 80%; }
+    .controls { margin: 10px 0; }
+    button { padding: 8px 16px; font-size: 16px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; transition: 0.3s; }
+    button:hover { background-color: #ddd; }
+    input[type="number"] { width: 60px; padding: 5px; font-size: 16px; margin-left: 5px; }
+    #timer { font-size: 18px; margin: 10px 0; color: #333; }
+    #results, #player { margin-top: 20px; }
+    table { margin: 10px auto; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
+    th, td { padding: 8px 12px; border: 1px solid #ccc; }
+    .correct { background-color: #d4edda; color: #155724; font-weight: bold; }
+    .wrong { background-color: #f8d7da; color: #721c24; font-weight: bold; }
+    audio { margin-top: 10px; width: 300px; }
+  </style>
+</head>
+<body>
+
+  <h1>🎤 Pronunciation Trainer</h1>
+  
+  <div id="twister">Peter Piper picked a peck of pickled peppers</div>
+
+  <div class="controls">
+    ⏱️ Time Limit (s):
+    <input type="number" id="seconds" value="10" min="5" max="30">
+    <button onclick="startRecording()">🔴 Start Recording</button>
+    <button onclick="playTTS()">🗣️ Hear Pronunciation</button>
+  </div>
+
+  <div id="timer">Time left: <span id="time">0</span>s</div>
+
+  <div id="results"></div>
+  <div id="player"></div>
+
+  <script>
+    let mediaRecorder;
+    let audioChunks = [];
+    let recognition;
+    let recordingTimeout;
+    let timerInterval;
+
+    let targetSentence = document.getElementById('twister').innerText.toLowerCase();
+    let targetWords = targetSentence.split(" ");
+
+    function updateTarget() {
+      targetSentence = document.getElementById('twister').innerText.toLowerCase();
+      targetWords = targetSentence.split(" ");
+    }
+
+    async function startRecording() {
+      updateTarget();
+      document.getElementById('results').innerHTML = "";
+      document.getElementById('player').innerHTML = "";
+      document.getElementById('time').textContent = document.getElementById('seconds').value;
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream);
+      audioChunks = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunks.push(e.data);
+      };
+
+      mediaRecorder.start();
+      startTimer();
+
+      recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+      recognition.lang = 'en-US';
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+      recognition.start();
+
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript.toLowerCase();
+        console.log('Heard:', transcript);
+        stopEverything(transcript);
+      };
+
+      recognition.onerror = (e) => {
+        console.error('Recognition error:', e.error);
+        stopEverything("");
+      };
+
+      recordingTimeout = setTimeout(() => {
+        recognition.stop();
+        stopEverything("");
+      }, document.getElementById('seconds').value * 1000);
+    }
+
+    function stopEverything(transcript) {
+      clearTimeout(recordingTimeout);
+      clearInterval(timerInterval);
+
+      if (recognition) recognition.stop();
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        const audioUrl = URL.createObjectURL(audioBlob);
+        const audio = document.createElement('audio');
+        audio.src = audioUrl;
+        audio.controls = true;
+        audio.id = "audioPlayer";
+
+        const slowButton = document.createElement('button');
+        slowButton.innerText = "🐢 Play Slow";
+        slowButton.onclick = () => {
+          const player = document.getElementById('audioPlayer');
+          if (player) {
+            player.playbackRate = 0.6;
+            player.play();
+          }
+        };
+
+        const normalButton = document.createElement('button');
+        normalButton.innerText = "▶️ Play Normal";
+        normalButton.onclick = () => {
+          const player = document.getElementById('audioPlayer');
+          if (player) {
+            player.playbackRate = 1.0;
+            player.play();
+          }
+        };
+
+        const playerDiv = document.getElementById('player');
+        playerDiv.innerHTML = '<h3>🎧 Your Recording:</h3>';
+        playerDiv.appendChild(audio);
+        playerDiv.appendChild(slowButton);
+        playerDiv.appendChild(normalButton);
+      };
+
+      showPhoneticComparison(transcript.split(" "));
+    }
+
+    function startTimer() {
+      let timeLeft = parseInt(document.getElementById('seconds').value);
+      document.getElementById('time').textContent = timeLeft;
+
+      timerInterval = setInterval(() => {
+        timeLeft--;
+        document.getElementById('time').textContent = timeLeft;
+        if (timeLeft <= 0) {
+          clearInterval(timerInterval);
+        }
+      }, 1000);
+    }
+
+    function fakePhonetic(word) {
+      return word
+        .toLowerCase()
+        .replace(/a/g, "AH")
+        .replace(/e/g, "EH")
+        .replace(/i/g, "IH")
+        .replace(/o/g, "OW")
+        .replace(/u/g, "UH")
+        .toUpperCase()
+        .split("")
+        .join(" ");
+    }
+
+    function showPhoneticComparison(spokenWords) {
+      let html = "<h3>🧪 Phonetic Comparison</h3><table><tr><th>Expected</th><th>Your Speech</th></tr>";
+
+      for (let i = 0; i < targetWords.length; i++) {
+        const expectedWord = targetWords[i] || "";
+        const spokenWord = spokenWords[i] || "";
+        const expectedPhonetic = fakePhonetic(expectedWord);
+        const spokenPhonetic = fakePhonetic(spokenWord);
+
+        const correctness = expectedPhonetic === spokenPhonetic ? "correct" : "wrong";
+
+        html += `<tr>
+                  <td class="${correctness}">${expectedWord}<br><small>[${expectedPhonetic}]</small></td>
+                  <td>${spokenWord}<br><small>[${spokenPhonetic}]</small></td>
+                 </tr>`;
+      }
+
+      html += "</table>";
+      document.getElementById('results').innerHTML = html;
+    }
+
+    function playTTS() {
+      updateTarget();
+      const utterance = new SpeechSynthesisUtterance(targetSentence);
+      utterance.lang = 'en-US';
+      utterance.rate = 0.9;
+      speechSynthesis.speak(utterance);
+
+      setTimeout(() => {
+        speechSynthesis.cancel(); // Cut off if exceeding time limit
+      }, document.getElementById('seconds').value * 1000);
+    }
+  </script>
+
+</body>
+</html>
